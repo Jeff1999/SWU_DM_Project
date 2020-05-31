@@ -1,0 +1,74 @@
+---
+title: "Assignment4"
+author: "ChenGuang,222017321102093"
+date: "2020年5月18日"
+output: html_document
+---
+***1.Build a classifier to predict labels `r` from `x` with xgboost, and show the confusion matrix***
+Firstly, tidy the data. There are many NA in the data, we need to clean them.
+```{r}
+load("datasets/yrbs-1.rda")
+na_position=which(is.na(r))
+r1<-na.omit(r)
+x1=x[-na_position,]
+
+```
+**Build a classifier**
+
+Dividing the data into training set and test set.
+```{r}
+library(xgboost)
+```
+
+use cross validation to find best value of nrounds (and possibly eta)
+
+```{r}
+set.seed(2020-5-20)
+xgb.cv(data =x1,label=r1,num_class=8,nrounds=20,nfold=10,objective="multi:softmax")
+```
+Add L2 regularisation penalty, prevent overfitting.
+```{r}
+xgb.cv(data =x1,label=r1,num_class=8,nrounds=20,nfold=10,objective="multi:softmax",lambda=1)
+```
+Seems to plateau at about 13 rounds. Similar performance after varying the learning rate and penalty
+```{r}
+model<-xgboost(data=x1,label = r1,num_class=8,nrounds = 13,objective="multi:softmax",lambda=1)
+```
+Confusion matrix:
+```{r}
+table(predict(model,newdata=x1),r1)
+```
+Calculate accuracy:9830/(5436+9830)=0.64391.
+```{r}
+table(predict(model,newdata=x1)==r1)
+```
+
+***2.Describe and visualise which variables are most important in the prediction. ***
+
+**variable importance**
+```{r}
+xgb.importance(model = model)
+xgb.plot.shap(model=model, data=x1,top_n=4,n_col=2)
+```
+
+For the table and these plots, we can see that **q97,q9,q99,q13** are most important variables.
+
+***3.Describe and display the relationships between the most important variables and the label categories -- which category/categories is each of the most important variables useful for predicting? Can you produce a summary of the most distinctive predictors for each label category?***
+```{r}
+library(plyr)
+library(tidyverse)
+times<-function(x,times) {
+    ifelse (x == 1, times[],
+      ifelse (year(Date) == 2017, "2017","2018"))
+}
+ggplot(train,aes(label_train,train))+geom_bar(stat="identity",position="stack")
+```
+
+***4.Comment on whether (or not) task 3 would be ethically problematic if intended to be published, and for what reasons.***
+
+(1) We can draw from the previous analysis that the accuracy of the prediction is not good, and it is easy to produce erroneous results.
+
+(2) Deepen the stereotypes of different races, sometimes this is unreasonable.
+
+(3) The prediction effect is not good, and the release will make people question the authenticity of the general survey and generate negative emotions for scientific analysis.
+

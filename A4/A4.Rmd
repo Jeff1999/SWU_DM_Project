@@ -1,0 +1,170 @@
+---
+title: "A4 Your Risk Behaviour Survey"
+author: "Yifan Luo (骆轶凡)"
+date: "2020/5/18"
+output: html_document
+---
+
+# Task 1
+
+## 1.1 Clean NAs
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(xgboost)
+library(caret)
+```
+
+```{r}
+load("./datasets/yrbs-1.rda")
+```
+
+First, let's look their dimension.
+
+```{r}
+dim(x)
+length(r)
+```
+
+Combine two variables.
+
+```{r}
+data <- data.frame(x, r)
+```
+
+Then clean NAs from ethnicity labels.
+
+```{r}
+data <- data[complete.cases(data[,95]),]
+```
+
+Since ensemble model like XGBoost have strong classification ability even with NAs in training set, we don't need to clean table `x`.
+
+Now we split the data frame into training set and test set.
+
+```{r}
+library(Matrix)
+sample <- sample.int(n = nrow(data), size = floor(.75 * nrow(data)), replace = F)
+
+train <- data[sample, ]
+train_mat <- data.matrix(train[,c(1:94)])
+train_sparse <- Matrix(train_mat,sparse=T)
+labels <- train[,95]
+train.mat <- list(data=train_mat,label=labels) 
+train_xgb <- xgb.DMatrix(data = train.mat$data, label = train.mat$label) 
+
+test <- data[-sample, ]
+test_mat <- data.matrix(test[,c(1:94)]) 
+test.var.spmat <- Matrix(test_mat,sparse=T) 
+test_label <- test[,95]
+test.mat <- list(data=test_mat,label=test_label) 
+test_xgb <- xgb.DMatrix(data = test.mat$data, label = test.mat$label) 
+```
+
+## 1.2 Find Best `nrounds`
+
+In this section, we need to find the best `nrounds` with XGBoost CV.
+
+nrounds[default=100]
+It controls the maximum number of iterations (steps) required for gradient descent to converge.
+
+```{r}
+# xgb parameters
+params <- list(booster = "gbtree", objective = "multi:softmax", eta = 0.3, gamma = 0, max_depth = 6, min_child_weight = 1, subsample = 1, colsample_bytree = 1, num_class = 8)
+```
+
+```{r}
+xgbcv <- xgb.cv( params = params, data = train_xgb, nrounds = 100, nfold = 5, showsd = T, stratified = T, print.every.n = 10, early.stop.round = 20, maximize = F)
+```
+
+The table above shows us `Stopping. Best iteration` is the 48th round.
+
+## 1.3 Choose and Fit Full Model
+
+Let's try L2 regularization (equivalent to Ridge regression) on weights. It is used to avoid overfitting.
+
+```{r}
+xgb_l1 <- xgboost(data = train_xgb, num_class = 8, nrounds = 48, objective = "multi:softmax", lambda = 1, print.every.n = 5)
+```
+
+## 1.4 Confusion Matrix
+
+```{r}
+xgb_pred <- predict(xgb_l1, newdata = test_xgb) %>%
+  as.factor()
+
+confusionMatrix(xgb_pred, as.factor(test.mat$label))
+```
+
+Overall accuracy: 0.54 (95% CI: 0.5274 - 0.5593)
+
+Our predictor works well on calss 0, 1, 2, 3 and 7, weak performance on class 4, 5 and 6.
+
+# Task 2
+
+## Variable Importance
+
+```{r}
+xgb.importance(model = xgb_l1)
+xgb.plot.shap(model = xgb_l1, data=train_mat, top_n = 3, n_col = 2)
+```
+
+The top 3 important variables are: `q97`, `q9` and `q7`.
+
+# Task 3
+
+```{r}
+# plot functions
+
+r_total = sum(table(data$r))
+rprop=array(1:8)
+for (i in 1:8){ 
+  rprop[i]=table(data$r)[i]/r_total 
+}
+
+bar <- function(label,q){
+  t = table(label, q, dnn = c("r","q"))
+  for (i in 1:8){ t[i,]=t[i,]/rprop[i] }
+  t = as.data.frame(t)
+  return(ggplot(data=t,mapping=aes(x=factor(q),y=Freq,fill=r))+
+    geom_bar(stat ="identity", position = "dodge") )
+}
+```
+
+* q97
+
+```{r}
+
+bar(label = data$r, q = data$q97 )
+```
+
+Category 4 contributes most amount of importance in discrimination (factor 2 - 6), but weak performance in factor 1.
+
+* q9
+
+```{r}
+bar(label = data$r, q = data$q9)
+```
+
+Category 3 seems have a better performance than others.
+
+* q7
+
+```{r}
+tmp.df = train %>% filter(!is.na(q7))
+qplot(r,q7,data = tmp.df ,geom= "boxplot", fill = factor(r))
+```
+
+No obvious factors.
+
+Overall, feature q97 contributes most importance (gain 0.09) in discrimination.
+
+# Task 4
+
+From task 2, our XGBoost model only has 54% accuracy, which is not convinced enough to do academic predictions.
+
+Besides, this kind of data and prediciton will cause other problems such as ethnic stereotypes. Once the inaccurate predictions published, this will greatly decrease the authority of general surveys.

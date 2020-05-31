@@ -1,0 +1,18 @@
+Youth Risk Behaviour Survey (YRBS)
+
+The Youth Risk Behavior Survey asks a sample of high school students in the US about behaviours that are related to health risks (the PDF documentation file is on 'A4_youth_risk_behaviour_survey/datasets' folder). In the file `yrbs-1.rda` (also on the 'dataset' folder) you have two objects:
+
+- `x` is a matrix of 94 variables from the 2015 YRBS
+- `r` is a 0-7 variable coding race/ethnicity, with levels 0=American Indian/Alaskan Native, 1=Asian, 2=Black/African American, 3=Native Hawaiian or other Pacific Islander, 4=White, 5=Hispanic/Latino, 6=multiple race and Hispanic/Latino, 7=multiple-race but not Hispanic/Latino.  That is, `r+1` is the variable defined on page 99 of the documentation.
+
+
+Task 1: Build a classifier to predict labels `r` from `x` with xgboost, and show the confusion matrix
+
+   (You will need to specify the objective function for multi-class prediction, and you will need to remove observations with missing label)
+
+Task 2: Describe and visualise which variables are most important in the prediction. 
+
+Task 3: Describe and display the relationships between the most important variables and the label categories -- which category/categories is each of the most important variables useful for predicting? Can you produce a summary of the most distinctive predictors for each label category?
+
+Task 4:  Comment on whether (or not) task 3 would be ethically problematic if intended to be published, and for what reasons
+
