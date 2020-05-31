@@ -1,0 +1,947 @@
+---
+title: "A2 Predicting Taxi Tips"
+author: "Yifan Luo (骆轶凡)"
+date: "2020/5/11"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. First Look of Data
+
+Before we go deep into our modeling, have a quick lookthrough of our training set and test test will be easier beacuse it will inspire us the further processes in a reasonable way.
+
+## 1.1 Loading Libraries and Data
+
+```{r}
+library(Rmisc)
+library(tidyverse)
+library(lubridate)
+library(leaflet)
+library(geosphere)
+library(corrplot)
+library(caret)
+library(xgboost)
+```
+
+```{r}
+train <- read.csv("./datasets/week2.csv")
+test <- read.csv("./datasets/week4.csv")
+```
+
+## 1.2 Summary of Data
+
+```{r}
+summary(train)
+```
+
+```{r}
+glimpse(train)
+```
+
+
+```{r}
+summary(test)
+```
+
+```{r}
+glimpse(test)
+```
+
+Up to now, we have basic information of our training data `week2.csv` and test data `week4.csv`. 
+
+According to the table from `data_dictionary_trip_records_yellow.pdf`, we know that:
+
+* `VendorID`: factorial variable which contains `1` and `2` for two companies
+* `tpep_pickup_datetime` & `tpep_dropoff_datetime`: datetime variable for pick up and drop off time
+* `passenger_count`: factorial variable for amount of  passenger
+* `trip_distance`: double variable for trip distance
+* `pickup_longitude` & `pickup_latitude`, `dropoff_longitude` & `dropoff_latitude`: double variables for geographical coordinates
+* `RatecodeID`: factorial variable for final rate code
+* `store_and_fwd_flag`: factorial variable for trip record
+* `payment_type`: factorial variable for payment methods
+* `fare_amount`: double variable for time-and-distance far
+* `extra`, `mta_tax` & `improvement_surcharge`: double variables for different surcharges
+* `tolls_amount`: double variable for tolls
+* `tip_amount`: double varibale for tips, dependent variable of our our model
+* `total_amount`: double variable for total cost, **unhelpful feature**, abandon it latter
+
+## 1.3 Handling Missing Values
+
+Before we get deep into those features, we still have some work to do.
+
+First, let's combine two data sets together. We create a feature `type` in both tables before we bind them. `train` stands for coming from table `train`, `test` stands for coming from table `test`.
+
+```{r}
+train <- train %>% mutate(type = "train")
+test <- test %>% mutate(type = "test")
+overall <- rbind(train, test)
+```
+
+Table `overall` contains training set and test set.
+
+Then, check all missing values.
+
+```{r}
+for (c in colnames(overall)){
+  print(paste(c, ":", sum(is.na(overall$c))))
+}
+
+sum(is.na(overall))
+```
+
+Lucky me! None of one missing value, which is very rare during data cleaning.
+
+## 1.4 Reformating Features
+
+As we've talked about in section 1.2, there are some features have improper type, we need to reformate them.
+
+```{r}
+train <- train %>%
+  mutate(VendorID = factor(VendorID),
+         tpep_pickup_datetime = ymd_hms(tpep_pickup_datetime),
+         tpep_dropoff_datetime = ymd_hms(tpep_dropoff_datetime),
+         passenger_count = factor(passenger_count),
+         RatecodeID = factor(RatecodeID),
+         payment_type = factor(payment_type))
+```
+
+## 1.5 Other Check (maybe not helpful for assignment)
+
+We also wondering if `total_amount` is consistent with the sum of all charge columns in table, let's just have a look.
+
+```{r}
+train %>% 
+  mutate(check = ((fare_amount + extra + mta_tax + tip_amount + tolls_amount + improvement_surcharge) == total_amount)) %>% 
+  select(check) %>% 
+  group_by(check) %>% 
+  count()
+```
+
+According the description form `data_dictionary_trip_records_yellow.pdf`, we know that some of our data are not consistent, maybe those passengers give tips by cash or just miscalculation of total charges, which is not hopeful for the sake of profit of companies.
+
+From my view, we can't just drop all the "miscalculation" rows. And `total_amount` seems not helpful in predicting tips according to the assignment description. So our strategy is drop the column `total_amount` latter and ignore the inconsistent data.
+
+# 2. Feature Visualisation
+
+In this part, we'll visualize some data and features from different perspectives to have a better understanding of our data.
+
+## 2.1 Map of Locations
+
+According to the description of data, most of out records are from USA. Let's visulize coordinates in a map.
+
+```{r}
+set.seed(20200511)
+# We only visualize 1% of total data (2,651,287)
+leaflet(sample_frac(train, 0.01)) %>% addProviderTiles("Esri.NatGeoWorldMap") %>%
+  addCircleMarkers(~ pickup_longitude, ~pickup_latitude, radius = 1,
+                   color = "blue", fillOpacity = 0.3)
+```
+
+We can see most of blue spots are around NYC, and a few spots appears on unreasonable location (e.g. around Africa). 
+
+JFK airport seems a popular spot according to the map, NYC is such a busy city for airplane transfer.
+
+```{r}
+summary(train$RatecodeID)
+```
+
+The summary of `RatecodeID` above tells us same story.  (`1` for `Standard rate`, `2` for `JFK`)
+
+## 2.2 Distribution of Features
+
+### 2.2.1 Target Variable `tip_amount`
+
+```{r}
+summary(train$tip_amount)
+```
+
+The summary above tells us we have some very strange tips, some are negative and some are extremely high. We need to handle these outliers latter.
+
+Firstly, create a column named `tip_perc` for percentage of tip of total fare.
+
+```{r}
+train <- train %>%
+  mutate(tip_perc = tip_amount / total_amount)
+```
+
+Check the fare rows containing missing values.
+
+```{r}
+train[which(is.na(train$tip_perc)), c(13:19, 21)]
+```
+
+Missing values all come from denominator 0. 
+
+Surprisingly, there are also lots of 0's in other fare columns, we drop these rows because they provide unhelpful information to predict `tip_amount`.
+
+```{r}
+train <- na.omit(train)
+```
+
+Let's have a quick review of our negative fare data.
+
+```{r}
+train[train$tip_amount < 0, c(13:19, 21)]
+```
+
+It turns out that all the negative values are just "symbol typo" during recording. Our strategy is we use their absoluate value instead of themselves. 
+
+```{r}
+train$fare_amount <- abs(train$fare_amount)
+train$extra <- abs(train$extra)
+train$mta_tax <- abs(train$mta_tax)
+train$tip_amount <- abs(train$tip_amount)
+train$tolls_amount <- abs(train$tolls_amount)
+train$improvement_surcharge <- abs(train$improvement_surcharge)
+train$total_amount <- abs(train$total_amount)
+```
+
+Now, let's check the target variable `tip_amount`.
+
+```{r}
+summary(train$tip_perc)
+```
+
+```{r}
+ggplot(train, aes(x = tip_perc)) + 
+  geom_histogram(bins = 100, fill = "blue")
+```
+
+We can see most `tip_perc` are around 0 ~ 25%.
+
+According to this [passage](https://www.aarp.org/travel/travel-tips/budget/info-03-2011/travel-tipping-tips.html), the normal range of tips are around 15% ~ 20% of the total fare. In this case, we only extract rows with `tip_perc` from 0 ~ 25%
+
+```{r}
+train <- subset(train, train$tip_perc < 0.25)
+```
+
+Let's have a look of our new data.
+
+```{r}
+ggplot(train, aes(x = tip_perc)) + 
+  geom_histogram(binwidth = 0.01, fill = "blue")
+```
+
+We can see that most people don't give any tip at all (maybe pay cash tip, but not counted). Although it's a normal distribution of tip around 5% ~ 15%, 17%, 20% and 23% seems are popular choises when people giving their tips.
+
+### 2.2.2 `tpep_pickup_datetime` and `tpep_dropoff_datetime`
+
+We also wondering the distribution of pick up time and drop off time.
+
+```{r}
+train %>%
+  ggplot(aes(x = tpep_pickup_datetime)) + 
+  geom_histogram(aes(fill = weekdays(tpep_pickup_datetime)), bins = 120)
+```
+
+```{r}
+train %>%
+  ggplot(aes(x = tpep_dropoff_datetime)) + 
+  geom_histogram(aes(fill = weekdays(tpep_dropoff_datetime)), bins = 120)
+```
+
+Here we found some interesting information: both pictures have similar homogeneous distribution.
+
+On weekends, people prefer to take a taxi and give tips in evening and midnight (0:00 ~ 3:00). On weekdays, people more like to take taxis in their working hours and also in evening. 
+
+The date analyzation inspires us of the duration of each trip. We create a column named `tpep_dur` by calculating the duration of each trip.
+
+```{r}
+train <- train %>%
+  mutate(tpep_dur = as.numeric(difftime(tpep_dropoff_datetime, tpep_pickup_datetime, units = "mins")))
+```
+
+Let's check out our new feature `tpep_dur`.
+
+```{r}
+summary(train$tpep_dur) # unit: mins
+```
+
+Some of them are pretty weird: negative duration? 42.5 hours in one trip? We need to focous on these outliers.
+
+```{r}
+# Select negative duration and duration more than one day
+subset(train, train$tpep_dur < 0 | train$tpep_dur > 24 * 60)[, c(2:3, 22)] 
+```
+
+Only 12 outliers, we got 2600K records in total, so just drop them.
+
+```{r}
+train <- train[0 < train$tpep_dur & train$tpep_dur < 24 * 60, ]
+```
+
+```{r}
+train[train$tpep_dur < 60, ] %>% # only check duration up to an hour
+  ggplot(aes(x = tpep_dur)) + 
+  geom_histogram(bins = 24, fill = "blue")
+```
+
+The histogram says most trips duration are around 2.5 mins ~ 20 mins, which is quite reasonable. But, this is also right skewd.
+
+Let's try log scaled.
+
+```{r}
+train <- train %>%
+  mutate(tpep_dur_log = log10(tpep_dur))
+```
+
+```{r}
+train %>% 
+  ggplot(aes(x = tpep_dur_log)) + 
+  geom_histogram(bins = 24, fill = "blue")
+```
+
+Much better! But there are also some suspicious data less than 1 min or more than 17 hours, which are not common in real life. Note that we just keep them now.
+
+# 2.2.3 Day of Week and Hour of Day from `tpep_pickup_datetime`
+
+Although we've visualized pick up time and drop off time in section 2.2.2, we found some interesting homogeneous changes though the whole date. In this part, we extract `day_of_wk` and `hour_of_day` from `tpep_pickup_datetime` to focous on other details.
+
+```{r}
+train <- train %>%
+  mutate(day_of_wk = factor(weekdays(tpep_pickup_datetime))) %>%
+  mutate(hour_of_day = hour(tpep_pickup_datetime))
+```
+
+We plot pictures bellow to show their difference from two companies. (`VendorID`:1 or 2)
+
+```{r}
+train %>%
+  ggplot(aes(x = VendorID)) + 
+  geom_bar(aes(fill = VendorID))
+```
+
+
+```{r}
+train %>%
+  group_by(day_of_wk, VendorID) %>%
+  count() %>%
+  ggplot(aes(x = day_of_wk, y = n)) + 
+  geom_point(aes(color = VendorID), size = 5)
+```
+
+```{r}
+train %>%
+  group_by(hour_of_day, VendorID) %>%
+  count() %>%
+  ggplot(aes(x = hour_of_day, y = n)) + 
+  geom_point(aes(color = VendorID), size = 5)
+```
+
+Generally, blue dots (VeriFone Inc.) have more records than red dots (Creative Mobile Technologies, LLC). In picture 2, we found that Sunday and Monday contains less records, more records appears on weekends. In picture above, people prefer to take a taxi in period from 18:00 to 22:00. Big gap during 7:00 ~ 23:00, small in other cases.
+
+This inspires us to recode time sensbily with a factor variable `period`: `M` for medium (7:00 ~ 17:00), `H` for high (17:00 ~ 0:00) and `L` for low (0:00 ~ 7:00)
+
+```{r}
+train <- train %>%
+  mutate(period =
+           ifelse(hour_of_day > 7 & hour_of_day <= 17, "M",
+               ifelse(hour_of_day >= 0 & hour_of_day <= 7, "L", "H"))
+         ) %>%
+  mutate(period = factor(period))
+```
+
+```{r}
+summary(train$period)
+```
+
+### 2.2.4 `passenger_count` and `store_and_fwd_flag`
+
+```{r}
+train %>%
+  group_by(passenger_count) %>%
+  count() %>%
+  ggplot(aes(x = passenger_count, y = n)) + 
+  geom_col(aes(fill = passenger_count))
+```
+
+```{r}
+summary(train$passenger_count)
+```
+
+Most people choose to take a taxi by oneself, two passengers is also a common type. 
+
+However. We also found 141 suspicious records: 0 customer trip, just keep them now.
+
+```{r}
+train %>%
+  ggplot(aes(x = store_and_fwd_flag)) + 
+  geom_bar(aes(fill = store_and_fwd_flag))
+```
+
+```{r}
+summary(train$store_and_fwd_flag)
+```
+
+Most of records are "not store and forward" type.
+
+### 2.2.5 Coordinates: `pickup_longitude`, `pickup_latitude` and `dropoff_longitude`, `dropoff_latitude`
+
+In section 2.1, we've plot coordinates on map and found that JKF is a hot spot. Here we focous on the distribution of coordinates. Some of spots are out of NYC, we add a filter to constrain the location.
+
+```{r}
+p1 <- train %>%
+  filter(pickup_longitude > -74.05 & pickup_longitude < -73.7) %>%
+  ggplot(aes(pickup_longitude)) +
+  geom_histogram(fill = "red", bins = 40)
+
+p2 <- train %>%
+  filter(dropoff_longitude > -74.05 & dropoff_longitude < -73.7) %>%
+  ggplot(aes(dropoff_longitude)) +
+  geom_histogram(fill = "blue", bins = 40)
+
+p3 <- train %>%
+  filter(pickup_latitude > 40.6 & pickup_latitude < 40.9) %>%
+  ggplot(aes(pickup_latitude)) +
+  geom_histogram(fill = "red", bins = 40)
+
+p4 <- train %>%
+  filter(dropoff_latitude > 40.6 & dropoff_latitude < 40.9) %>%
+  ggplot(aes(dropoff_latitude)) +
+  geom_histogram(fill = "blue", bins = 40)
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=FALSE)
+multiplot(p1, p2, p3, p4, layout=layout)
+```
+
+# 3. Data Exploration
+
+In this part, we dig into some variables and hope to find potential relations amoung them.
+
+## 3.1 `day_of_wk`/`hour_of_day` V.S. `tip_amount`
+
+```{r}
+train %>%
+  group_by(day_of_wk, VendorID) %>%
+  summarise(tip_median = median(tip_amount)) %>%  # median of tip
+  ggplot(aes(x = day_of_wk, y = tip_median)) + 
+  geom_point(aes(color = VendorID), size = 5)
+```
+
+This tells us the relation of `tip_median` with `day_of_wk`: people give more tips on weekdays than weekends.
+
+```{r}
+train %>%
+  group_by(hour_of_day, VendorID) %>%
+  summarise(tip_median = median(tip_amount)) %>%  # median of tip
+  ggplot(aes(x = hour_of_day, y = tip_median)) + 
+  geom_point(aes(color = VendorID), size = 5)
+```
+
+There is a sharp decrease after midnight (3:00 ~ 6:00), but a constant rise from 16:00 ~ 0:00.
+
+The two pitcures above tells us `VendorID`, `day_of_wk` and `hour_of_day` will be a great contribution when predicting  `tip_amount`.
+
+## 3.2 `passenger_count` V.S. `tip_amount`
+
+From section 2.2.4, we found that more people prefer to take a taxi alone, and two people seems also a common option. Here, we focous on how does different `passenger_count` affect `tip_amount`.
+
+```{r}
+train %>%
+  ggplot(aes(x = passenger_count, y = tip_amount)) + 
+  scale_y_log10() +  # in case some high tip will stretch whole pic
+  geom_boxplot(aes(color = passenger_count)) + 
+  facet_wrap(~ VendorID)
+```
+
+From the picture above, we noticed that vendor 2 (VeriFone Inc.) has more records of 7 or more people. But the median of tip seems pretty flat cross two pictures especially in vendor 2. We also found that both companies has 0 passenger records.
+
+```{r}
+train %>%
+  ggplot(aes(x = tip_amount)) + 
+  geom_density(aes(fill = VendorID), position = "stack") + 
+  scale_x_log10()  # in case we have high tip
+```
+
+Lot of spikes and same pattern! Although we've log-transformed `tip_amount`, it still shows us two sharp peaks.
+
+## 3.3 `store_and_fwd_flag` V.S. `tip_amount`
+
+```{r}
+train %>% 
+  ggplot(aes(x = passenger_count, y = tip_amount)) + 
+  geom_boxplot(aes(color = passenger_count)) + 
+  scale_y_log10() +  # log scaled
+  facet_wrap(~ store_and_fwd_flag)
+```
+
+In class Y (store and forward trip), we found no any 0 passenger records. All high amount records (7~9 passengers) appear in class N (not store and forward trip).
+
+## 3.4 `RatecodeID` V.S. `tip_amount`
+
+Before we connect `RarecodeID` with `tip_amount`, let's examine outliers first.
+
+```{r}
+summary(train$RatecodeID)
+```
+
+Our description doesn't include `RatecodeID` 99, they must be outliers. Only 35 outliers, just drop them.
+
+```{r}
+train <- subset(train, train$RatecodeID != 99)
+```
+
+```{r}
+train %>% 
+  ggplot(aes(x = RatecodeID, y = tip_amount)) + 
+  geom_boxplot(aes(color = RatecodeID)) + 
+  scale_y_log10() + 
+  facet_wrap(~ VendorID)
+```
+
+This tells us different `RatecodeID` will cause different `tip_amount`. `RatecodeID` 2 (JFK), 3 (Newark) and 4 (Nassau or Westchester) will have more tip than 1 and 5. Except high tips show in verdor 1 with code 6, both vendors have similar pattern.
+
+## 3.5 `payment_type` V.S. `tip_amount`
+
+```{r}
+summary(train$payment_type)
+```
+
+Only four types.
+
+```{r}
+train %>% 
+  ggplot(aes(x = payment_type, y = tip_amount)) + 
+  geom_boxplot(aes(color = payment_type)) + 
+  scale_y_log10() + 
+  facet_wrap(~ VendorID)
+```
+
+Customers pay by type 1 (Credit card) seems have both higher and lower tip than others, but type 2 (Cash) and 3 (No charge) in verdor 1 has higher median. Vendor 2 has a significent difference from vendor 1: no type 2 records, but lower type 3 and higher type 4 (Dispute) payment.
+
+# 4. Feature Engineering
+
+In this section, we create some other new features to help us have a better prediction performance.
+
+## 4.1 Direct Distance
+
+Since we have coordinates information, we are wondering if the distance can be used to predict `tip_amount`. Here we create a feature named `dist` to represent the direct distance from pick-up point to drop-off point.
+
+```{r}
+pickup_coor <- train %>%
+  select(pickup_longitude, pickup_latitude)
+dropoff_coor <- train %>%
+  select(dropoff_longitude, dropoff_latitude)
+
+train$dist <- distCosine(pickup_coor, dropoff_coor)
+```
+
+```{r}
+train %>%
+  ggplot(aes(x = dist, y = tip_amount)) + 
+  geom_point() + 
+  scale_x_log10() + 
+  scale_y_log10()
+```
+
+This is really a big mess. Hopefully we still find something: the distance generally increases with increasing tip.
+
+We get rid of some extremes and let's have a better look.
+
+```{r}
+train %>%
+  filter(dist > 100 & dist < 100e3) %>%
+  ggplot(aes(dist, tip_amount)) +
+  geom_bin2d(bins = c(500,500)) +
+  scale_x_log10() +
+  scale_y_log10()
+```
+
+A much intense positive relation.
+
+## 4.2 Airport Distance
+
+In section 2.1, we've visualized coordinates on the map and found that some airport (e.g. JFK) are really hot spots. We hope to find some relation with these locations. Here we create four features: `jfk_dist_pick`, `jfk_dist_drop` and `lg_dist_pick`, `lg_dist_drop`.
+
+```{r}
+# form google
+jfk_coor <- tibble(lon = -73.778889, lat = 40.639722)
+la_guardia_coor <- tibble(lon = -73.872611, lat = 40.77725)
+
+pickup_coor <- train %>%
+  select(pickup_longitude, pickup_latitude)
+dropoff_coor <- train %>%
+  select(dropoff_longitude, dropoff_latitude)
+
+train$jfk_dist_pick <- distCosine(pickup_coor, jfk_coor)
+train$jfk_dist_drop <- distCosine(dropoff_coor, jfk_coor)
+train$lg_dist_pick <- distCosine(pickup_coor, la_guardia_coor)
+train$lg_dist_drop <- distCosine(dropoff_coor, la_guardia_coor)
+```
+
+```{r}
+p1 <- train %>%
+  ggplot(aes(jfk_dist_pick)) +
+  geom_histogram(bins = 30, fill = "red") +
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 2e3) 
+
+p2 <- train %>%
+  ggplot(aes(jfk_dist_drop)) +
+  geom_histogram(bins = 30, fill = "blue") +
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 2e3) 
+
+p3 <- train %>%
+  ggplot(aes(lg_dist_pick)) +
+  geom_histogram(bins = 30, fill = "red") +
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 2e3) 
+
+p4 <- train %>%
+  ggplot(aes(lg_dist_drop)) +
+  geom_histogram(bins = 30, fill = "blue") +
+  scale_x_log10() +
+  scale_y_sqrt() +
+  geom_vline(xintercept = 2e3) 
+
+layout <- matrix(c(1,2,3,4),2,2,byrow=FALSE)
+multiplot(p1, p2, p3, p4, layout=layout)
+```
+
+We can define a JFK/La Guardia trip as having a pickup or dropoff distance of less than 2 km from the corresponding airport. We create two features: `jfk_trip` and `lg_trip`.
+
+```{r}
+train <- train %>%
+  mutate(jfk_trip = (jfk_dist_pick < 2e3) | (jfk_dist_drop < 2e3),
+         lg_trip = (lg_dist_pick < 2e3) | (lg_dist_drop < 2e3))
+```
+
+
+```{r}
+p1 <- train %>%
+  ggplot(aes(jfk_trip, tip_amount, color = jfk_trip)) +
+  geom_boxplot() +
+  scale_y_log10() 
+
+p2 <- train %>%
+  ggplot(aes(lg_trip, tip_amount, color = lg_trip)) +
+  geom_boxplot() +
+  scale_y_log10()
+
+layout <- matrix(c(1,2),1,2,byrow=FALSE)
+multiplot(p1, p2, layout=layout)
+```
+
+We can see that airport trip seems have much higher `tip_amount` than others. Our model should include these features.
+
+# 5. Data Cleaning
+
+So far, we've visualized some data and create some new features. During the process, we also finish some data cleaning. Before we fit our model, we'd better have a quick review and make sure our data is totally OK.
+
+```{r}
+summary(train)
+```
+
+Then check each columns.
+
+```{r}
+for (c in colnames(train)){
+  print(paste(c, ":", sum(is.na(train$c))))
+}
+```
+
+So far, we didn't find any NA values, which is greate! Let's examine more details.
+
+```{r}
+p1 <- train %>%
+  ggplot(aes(x = passenger_count)) + 
+  geom_bar() + 
+  scale_y_log10()
+
+p2 <- train %>%
+  ggplot(aes(x = trip_distance)) + 
+  geom_histogram() + 
+  scale_y_log10()
+
+p3 <- train %>%
+  ggplot(aes(x = RatecodeID)) + 
+  geom_bar() + 
+  scale_y_log10()
+
+p4 <- train %>%
+  ggplot(aes(x = store_and_fwd_flag)) + 
+  geom_bar() + 
+  scale_y_log10()
+
+p5 <- train %>%
+  ggplot(aes(x = payment_type)) + 
+  geom_bar() + 
+  scale_y_log10()
+
+p6 <- train %>%
+  ggplot(aes(x = fare_amount)) + 
+  geom_histogram() + 
+  scale_y_log10() + 
+  scale_x_log10()
+
+layout <- matrix(c(1,2,3,4,5,6),2,3,byrow=FALSE)
+multiplot(p1, p2, p3, p4, p5, p6, layout=layout)
+```
+
+So far so good. Next, we need to fit model.
+
+# 6. Model Fitting
+
+## 6.1 Correlations
+
+In this section, we use a correlation max to help us have a overview of relation  among features.
+
+```{r}
+train %>%
+  # we only select some useful features, this may be subjective
+  select(VendorID, passenger_count, trip_distance, pickup_longitude, pickup_latitude, dropoff_longitude, dropoff_latitude, RatecodeID, store_and_fwd_flag, payment_type, fare_amount, extra, mta_tax, tip_amount, tolls_amount, improvement_surcharge, tpep_dur, day_of_wk, hour_of_day, period, dist, jfk_trip, lg_trip) %>%
+  # turn everything into numerical
+  mutate(passenger_count = as.integer(passenger_count),
+         VendorID = as.integer(VendorID),
+         RatecodeID = as.integer(RatecodeID),
+         store_and_fwd_flag = as.integer(store_and_fwd_flag),
+         payment_type = as.integer(payment_type),
+         jfk_trip = as.integer(jfk_trip),
+         lg_trip = as.integer(lg_trip),
+         day_of_wk = as.integer(day_of_wk),
+         hour_of_day = as.integer(hour_of_day),
+         period = as.numeric(period))%>%
+  cor(use="complete.obs", method = "spearman") %>%
+  corrplot(type="lower", method="circle", diag=FALSE)
+```
+
+From the matrix above, we know that `payment_type` has a strong negative impact on `tip_amount`, while `trip_distance` and `fare_amount` have less significent positive impact.
+
+`trip_distance` has very strong correlation with `fare_amount`, `tpep_dur` and `dist`.
+
+Some other blue points are seems not very dense, which implies that most of our features have no strong linear relation.
+
+## 6.2 Data Formatting
+
+Just like we've done in data cleaning and data exploration on training set, we need to do the same thing on test set to make data format consistent.
+
+```{r}
+# form google
+jfk_coor <- tibble(lon = -73.778889, lat = 40.639722)
+la_guardia_coor <- tibble(lon = -73.872611, lat = 40.77725)
+
+pickup_coor <- overall %>%
+  select(pickup_longitude, pickup_latitude)
+dropoff_coor <- overall %>%
+  select(dropoff_longitude, dropoff_latitude)
+
+overall$jfk_dist_pick <- distCosine(pickup_coor, jfk_coor)
+overall$jfk_dist_drop <- distCosine(dropoff_coor, jfk_coor)
+overall$lg_dist_pick <- distCosine(pickup_coor, la_guardia_coor)
+overall$lg_dist_drop <- distCosine(dropoff_coor, la_guardia_coor)
+overall$dist <- distCosine(pickup_coor, dropoff_coor)
+
+overall$fare_amount <- abs(overall$fare_amount)
+overall$extra <- abs(overall$extra)
+overall$mta_tax <- abs(overall$mta_tax)
+overall$tip_amount <- abs(overall$tip_amount)
+overall$tolls_amount <- abs(overall$tolls_amount)
+overall$improvement_surcharge <- abs(overall$improvement_surcharge)
+overall$total_amount <- abs(overall$total_amount)
+
+overall <- overall %>%
+  mutate(tpep_pickup_datetime = ymd_hms(tpep_pickup_datetime),
+         tpep_dropoff_datetime = ymd_hms(tpep_dropoff_datetime),
+         tip_perc = tip_amount / total_amount,
+         tpep_dur = as.numeric(difftime(tpep_dropoff_datetime, tpep_pickup_datetime, units = "mins")),
+         day_of_wk = factor(weekdays(tpep_pickup_datetime)),
+         hour_of_day = hour(tpep_pickup_datetime),
+         jfk_trip = (jfk_dist_pick < 2e3) | (jfk_dist_drop < 2e3),
+         lg_trip = (lg_dist_pick < 2e3) | (lg_dist_drop < 2e3))
+
+overall <- overall %>%
+  mutate(period =
+           ifelse(hour_of_day > 7 & hour_of_day <= 17, "M",
+               ifelse(hour_of_day >= 0 & hour_of_day <= 7, "L", "H"))
+         ) %>%
+  mutate(period = factor(period))
+```
+
+In case some factor level absence between training set and test set, we need to encode them into numerical features.
+
+```{r}
+overall <- overall %>%
+  mutate(passenger_count = as.numeric(passenger_count),
+         RatecodeID = as.numeric(RatecodeID),
+         store_and_fwd_flag = as.numeric(store_and_fwd_flag),
+         payment_type = as.numeric(payment_type),
+         jfk_trip = as.numeric(jfk_trip),
+         lg_trip = as.numeric(lg_trip),
+         period = as.numeric(period),
+         day_of_wk = as.numeric(day_of_wk))
+
+overall <- select(overall, -total_amount)
+```
+
+Have a check.
+
+```{r}
+glimpse(overall)
+```
+
+## 6.3 Feature Selection
+
+Based on previous analysis, we can pick up some features manually according to our understanding of data. It's also a good way to prevent collinearity.
+
+```{r}
+train_cols <- c("VendorID", "passenger_count", "trip_distance", "RatecodeID", "store_and_fwd_flag", "payment_type", "fare_amount", "extra", "mta_tax", "tolls_amount", "improvement_surcharge", "tpep_dur", "day_of_wk", "hour_of_day", "jfk_trip", "lg_trip", "period")
+
+y_col <- c("tip_amount")
+
+cols <- c(train_cols, y_col)
+```
+
+## 6.4 Validation Split
+
+We split our training set as training set and validation set
+
+First, split the original overall table into training set and test set.
+
+```{r}
+train_split <- overall %>%
+  filter(type == "train") %>%
+  select(-type) %>%
+  subset(select = cols)
+
+test_split <- overall %>%
+  filter(type == "test") %>%
+  select(-type) %>%
+  subset(select = cols)
+```
+
+Then, we get training set and validation set which will be used in cross validation.
+
+```{r}
+set.seed(20200513)
+
+train_index <- createDataPartition(train_split$tip_amount, p = 0.8, list = FALSE, times = 1)
+
+train_split <- train_split[train_index, ]
+valid_spilit <- train_split[-train_index, ]
+
+test_tip <- test_split$tip_amount
+test_split <- test_split %>%
+  select(-tip_amount)
+```
+
+## 6.5 Data Cleaning (to prevent overfitting)
+
+In case of our model will overfitting, we will remove some abvious outliers based on our previous analysis.
+
+We dicided to use XGBoost model to predict our data.
+Since ensemble models are not sensitive to missing values, we don't clean any data from `week4.csv`.
+
+```{r}
+train_split <- train_split %>%
+  filter(tip_amount < 200)
+```
+
+## 6.6 XGBoost
+
+We decide to use XGBosst to fit model and predict data.
+
+```{r}
+foo <- train_split %>% select(-tip_amount)
+bar <- valid_spilit %>% select(-tip_amount)
+
+dtrain <- xgb.DMatrix(as.matrix(foo),label = train_split$tip_amount)
+dvalid <- xgb.DMatrix(as.matrix(bar),label = valid_spilit$tip_amount)
+dtest <- xgb.DMatrix(as.matrix(test_split))
+```
+
+For the purpose of model selection, we use grid search to help us find a better model.
+
+```{r}
+set.seed(20200513)
+```
+
+XGBoost training process with grid search strategy. We use RMSE to evaluate our model.
+
+```{r}
+# Grid Search parameters
+searchGridSubCol <- expand.grid(subsample = c(0.5, 0.6),  # data subset per tree 
+                                colsample_bytree = c(0.5, 0.6),  # variables per tree 
+                                max_depth = c(3, 4),  # tree levels
+                                min_child = seq(1), 
+                                eta = c(0.1)  # shrinkage
+)
+
+ntrees <- 50  # 100, 200, 300 ...
+
+system.time(rmseErrorsHyperparameters <- apply(searchGridSubCol, 1, function(parameterList){
+  # Extract Parameters to test
+  currentSubsampleRate <- parameterList[["subsample"]]
+  currentColsampleRate <- parameterList[["colsample_bytree"]]
+  currentDepth <- parameterList[["max_depth"]]
+  currentEta <- parameterList[["eta"]]
+  currentMinChild <- parameterList[["min_child"]]
+  
+  # CV
+  xgboostModelCV <- xgb.cv(data =  dtrain, nrounds = ntrees, nfold = 5, showsd = TRUE, 
+                       metrics = "rmse", verbose = TRUE, "eval_metric" = "rmse",
+                     "objective" = "reg:linear", "max.depth" = currentDepth, "eta" = currentEta,                               
+                     "subsample" = currentSubsampleRate, "colsample_bytree" = currentColsampleRate
+                      , print_every_n = 10, "min_child_weight" = currentMinChild, booster = "gbtree",
+                     early_stopping_rounds = 10)
+  
+  # Scores
+  xvalidationScores <- as.data.frame(xgboostModelCV$evaluation_log)
+  rmse <- tail(xvalidationScores$test_rmse_mean, 1)
+  trmse <- tail(xvalidationScores$train_rmse_mean,1)
+  output <- return(c(rmse, trmse, currentSubsampleRate, currentColsampleRate, currentDepth, currentEta, currentMinChild))}))
+
+# ref: https://www.kaggle.com/silverstone1903/xgboost-grid-search-r
+```
+
+```{r}
+output <- as.data.frame(t(rmseErrorsHyperparameters))
+varnames <- c("TestRMSE", "TrainRMSE", "SubSampRate", "ColSampRate", "Depth", "eta", "currentMinChild")
+names(output) <- varnames
+output
+```
+
+Several models have same performance on both training set and test set. The last model (8th column) have lowest RMSE on both data set: 1.25 on test set and 1.23 on training set.
+
+Emsemble models are such a kind of powerful aggregation model, we don't need to clean any NA values (at least for XGBoost) and grid search strategy help us find models with high performance level. Those potential models will help us to avoid overfitting.
+
+# 7. Other Interpretation
+
+In this section, we will focous on model interpretation and accuracy problems.
+
+## 7.1 Understanding of Units of MSPE
+
+According to definition: Root Mean Square Error (RMSE) is the standard deviation of the residuals (prediction errors). Residuals are a measure of how far from the regression line data points are; RMSE is a measure of how spread out these residuals are. 
+
+For example, in our cases, the last model have test RMSE 1.23 with unit USD, which means 1.51 MSPE for predictions. In other words, it tells us how concentrated the real tip amount is around our predicitons.
+
+## 7.2 Face Validity
+
+According to definition, validation is an inductive process through which the modeler draws conclusions about the accuracy of the model based on the evidence available. 
+
+* Sensible inputs: Yes, we did a lot work on data cleaning and EDA, which makes every inputs sensible.
+
+* Expected signs of coefficients: Tree models have no signs.
+
+* Plausible predictions for extreme cases: Yes, ensemble models have better and more "objective" predictions based on "crowd decision".
+
+Unlike neural network model or linear model without cause-relationship parameters, our ensemble tree model is a "white box" model which makes our it easy to read, every split is nice and easy.
+
+## 7.3 Flaws and Improvement
+
+In this project, what we've done can be coverd by data cleaning, feature engineering and model building. Most of our work are focoud on features and understanding of our data, so there is still a lot we can do on our model building.
+
+* During data cleaning, we have a lot judgement based on our personal opinion. Since we indeed find some outliers and clean them off, it's still based on our experience from real life, not objective and professional advice. We need to do more investigation before we get our hand dirty to clean data.
+
+* During feature engineering, we use existing features to create new ones to help us build models. From my view, there are still a lot potential features which may greatly help our model but not covered in this project. In addition, we can use external data (e.g. weather data) and merge them with original one to build our model.
+
+* During model building, we basically just throw our data into XGBoost and do some regular cross-validation with grid search strategy. Since we have time series features like pick-up datetime and drop-off datetime, time-series model or harmonious models will also have good performance.
