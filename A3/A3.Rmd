@@ -1,0 +1,179 @@
+---
+title: "A3 Classifying Text Spam"
+author: "Yifan Luo (骆轶凡)"
+date: "2020/5/17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Question 1
+
+## Data Cleaning
+
+```{r}
+library(tidyverse)
+library(rpart)
+library(rattle)
+library(rpart.plot)
+library(caret)
+```
+
+From `data_description.txt` load our workspace.
+
+```{r}
+load("./datasets/spam.rda")
+```
+
+It contains three members, let's have a first look.
+
+* df
+
+```{r}
+dim(df)
+```
+
+```{r}
+head(df)
+```
+
+```{r}
+sum(is.na(df))
+```
+
+No NA values.
+
+* wordmatrix
+
+```{r}
+dim(wordmatrix)
+```
+
+```{r}
+head(wordmatrix, 1)
+```
+
+```{r}
+sum(is.na(wordmatrix))
+```
+
+Since `df` and `wordmatrix` has same column numbers, luckly we don't need to do data cleaning.
+
+* common_words
+
+```{r}
+summary(common_words)
+```
+
+```{r}
+head(common_words)
+```
+
+No any suspicious data, no any data cleaning yet.
+
+## Model Fitting
+
+According to the description, we use `rpart` to fit a tree model.
+
+```{r}
+# y is a factor so we use "class" model
+# ref: https://www.rdocumentation.org/packages/rpart/versions/4.1-15/topics/rpart
+tree <- rpart(df$is_spam ~ wordmatrix, method = "class", na.action = na.omit)
+```
+
+## Predicting and Plotting
+
+```{r}
+pred <- predict(tree, type = "class")
+plotcp(tree)
+```
+
+```{r}
+prp(tree)
+```
+
+All our branches are in same direction. Because each split is according to the absense or attendence of a word. Once it shows up, go right and class to spam.
+
+```{r}
+printcp(tree)
+```
+
+## Prunning
+
+Let's check out if we need to prune the tree.
+
+```{r}
+ptree <- prune(tree, cp = tree$cptable[which.min(tree$cptable[,"xerror"]),"CP"])
+```
+
+```{r}
+printcp(ptree)
+```
+
+No need to prune. The pruned tree is exactly the previous one.
+
+It implies we have used the minimum `xerror` tree. Otherwise, an alternative is to use the smallest tree that is within 1 standard error of the best tree (the one we've selected). 
+
+## Confusion Matrix
+
+```{r}
+true <- df$is_spam %>%
+  as.factor()
+
+confusionMatrix(pred, true)
+```
+
+We also got other statistics from the table above.
+
+High accuracy (0.96) and super high sensitivity (0.99), but specificity (0.76) is not as good as the previous ones.
+
+# Question 2
+
+## Statistics Computing
+
+```{r}
+y <- c()
+n <- c()
+e <- c()
+
+# calculate the times they present in spam and ham
+for (i in 1:ncol(wordmatrix)){
+  y[i] <- sum(wordmatrix[df$is_spam, i])  # number of attendance
+  n[i] <- sum(wordmatrix[!df$is_spam, i])  # number ofabsence
+  e[i] <- log(y[i]+1) - log(n[i]+1)  # evdience level
+}
+
+score <- (wordmatrix > 0) %*% e  # matrix multiply
+```
+
+The `e[i]` is assumed to represent the importance of ith word in spam classification. Higher value implies higher probability to classified as a spam.
+
+Each row of `score` represents the evidence level of a sentence, same as `e[i]`, higher value implies higher probability to classified as a spam.
+
+## Threshold and Confusion Matrix
+
+According to the assignment description, we need to make sure that the proportion of spam predicted is equal to the proportion observed. 
+
+```{r}
+threshold <- quantile(score, 1 - sum(df$is_spam)/nrow(wordmatrix))
+
+threshold
+```
+
+```{r}
+table(df$is_spam, score>threshold)
+```
+
+We can see FP (242) and FN (247) are pretty close. 
+
+# Question 3
+
+The UCI archive tells us that our spam data are collected from UK but ham data are from different scources (70% are from Singapore).
+
+People from countries under different culture have various linguistic habits, words even grammars. 
+
+Since most of our data are from Singapore, our model may be useful in predicting mails from Singapore. It performs less efficient if a mail is from other country.
+
+In question 2, we set our model with a specific cutoff based on our data set, it will cause kind of "overfitting" and cause generalizability problem if we use our model on different data set.

@@ -1,0 +1,14 @@
+The SMS spam dataset contains spam and non-spam ('ham') text messages accumulated from several sources. The description at the UCI archive is here (https://archive.ics.uci.edu/ml/datasets/SMS+Spam+Collection)
+
+We have pre-processed the data to make life easier for you.  The file 'spam.rda' is an R binary workspace. When you load it into R with 
+
+  load("spam.rda")
+
+
+Three objects will appear in your R workspace:
+
+  df: data frame with three columns: text containing the original text for each message, is_spam with TRUE for spam and FALSE for non-spam messages, and words containing a character vector of words for each message. Words have been created by dividing the text at spaces at the characters  .,:()?! There are some zero-length words; these occur when two of the dividing characters are adjacent.
+
+  common_words:  all the words that occur more than 20 times
+
+  word_matrix:  a matrix with a row for each message and a column for each common word, indicating how often the word occurs in the message.

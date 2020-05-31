@@ -1,0 +1,7 @@
+This assignment uses the SMS Spam dataset from the 'A3_classifying_text_spam/dataset' folder.
+
+1. Use rpart to fit and prune (if necessary) a tree predicting spam/non-spam from the common word counts in the wordmatrix matrix. Report the accuracy with a confusion matrix. Plot the fitted tree (without all the labels) and comment on its shape.
+
+2. For each common word in wordmatrix , compute the numbers y_i and n_i and that give, respectively, the number of occurrences in spam and non-spam messages. The overall evidence provided by having this word in a message can be approximated by e_i = \log(y_i+1) - \log(n_i+1). A `Naïve Bayes’ classifier sums up the e_i for every (common) word in the message to get an overall score for each message and then splits this at some threshold to get a classification. Construct a naïve Bayes classifier and choose the threshold so the proportion of spam predicted is the same as the proportion observed. Report the accuracy with a confusion matrix (It’s called naïve Bayes because it would be a Bayesian predictor if the words were all independently chosen, which they obviously won’t be)
+
+3. Read the description at the UCI archive of how the dataset was constructed. Why is spam/non-spam accuracy likely to be higher with this dataset than in real life? What can you say about the generalisability of the classifier to particular populations of text users?
